@@ -1,40 +1,67 @@
-# Jupyter Notebook Documentation
+import osmnx as ox
+import networkx as nx
+from shapely.geometry import LineString
+import random
 
-Welcome to the **Jupyter Notebook** documentation site. **Jupyter Notebook**
-is a simplified notebook authoring application, and is a part of [Project
-Jupyter](https://docs.jupyter.org/en/latest/), a large umbrella project
-centered around the goal of providing tools (and [standards](https://docs.jupyter.org/en/latest/#sub-project-documentation))
-for interactive computing with [computational notebooks](https://docs.jupyter.org/en/latest/#what-is-a-notebook).
+# Location of the testing center
+TESTING_CENTER = (51.5074, -0.1278)  # Example: London coords
 
-A [computational notebook](https://docs.jupyter.org/en/latest/#what-is-a-notebook)
-is a shareable document that combines computer
-code, plain language descriptions, data, rich visualizations like 3D models,
-charts, graphs and figures, and interactive controls. A notebook, along with
-an editor like **Jupyter Notebook**, provides a fast interactive environment for
-prototyping and explaining code, exploring and visualizing data, and sharing
-ideas with others.
+# Download the street network (you can use a custom polygon)
+G = ox.graph_from_point(TESTING_CENTER, dist=2000, 
+                        network_type='drive', simplify=True)
 
-**Jupyter Notebook** is a sibling to other notebook authoring applications under
-the Project Jupyter umbrella, like [JupyterLab](https://jupyterlab.readthedocs.io/en/stable/)
-and [Jupyter Desktop](https://github.com/jupyterlab/jupyterlab-desktop).
-Jupyter Notebook offers a lightweight, simplified experience compared to JupyterLab.
+# Remove disallowed roads
+allowed_highway_types = [
+    'residential', 'tertiary', 'secondary', 'primary', 
+    'unclassified', 'living_street', 'service'
+]
+G = ox.utils_graph.graph_from_gdfs(
+    *ox.graph_to_gdfs(G, nodes=True, edges=True)
+)
 
-Read more about how to use **Jupyter Notebook** on this site, in the [User
-Documentation](notebook.md).
+# Filter edges (roads)
+edges = ox.graph_to_gdfs(G, nodes=False)
+edges = edges[edges['highway'].apply(lambda x: any(hw in allowed_highway_types for hw in (x if isinstance(x, list) else [x])))]
 
-```{image} ./_static/images/notebook-running-code.png
+# Rebuild filtered graph
+G = ox.graph_from_gdfs(*ox.graph_to_gdfs(G, edges=edges))
 
-```
+# Choose start node nearest the testing center
+start_node = ox.nearest_nodes(G, TESTING_CENTER[1], TESTING_CENTER[0])
 
-- [Installation](https://jupyter.readthedocs.io/en/latest/install.html)
-- [Starting the Notebook](https://jupyter.readthedocs.io/en/latest/running.html)
+def is_valid_route(route, min_km=6, max_km=8):
+    # Ensure length within bounds and diversity of roads
+    total_length = sum(ox.utils_graph.get_route_edge_attributes(G, route, 'length'))
+    if total_length < min_km * 1000 or total_length > max_km * 1000:
+        return False
+    # Analyze road types
+    road_types = set()
+    for u, v in zip(route[:-1], route[1:]):
+        data = G.get_edge_data(u, v)
+        if data:
+            highway = data[0].get('highway')
+            if isinstance(highway, list):
+                road_types.update(highway)
+            else:
+                road_types.add(highway)
+    # Roundabouts detection, simple version
+    roundabouts = [data for u, v, data in G.edges(data=True) if 'junction' in data and data['junction'] == 'roundabout']
+    has_roundabout = any(edge for edge in roundabouts if edge['u'] in route and edge['v'] in route)
+    return (
+        has_roundabout and
+        'residential' in road_types and
+        'primary' in road_types
+    )
 
-```{toctree}
-:maxdepth: 2
+# Generate candidate looped routes
+routes = []
+for i in range(50):
+    try:
+        loop = nx.shortest_path(G, start_node, start_node, weight='length', method='dijkstra')
+        if is_valid_route(loop):
+            routes.append(loop)
+    except:
+        continue
 
-user-documentation
-configuration
-migrate_to_notebook7
-contributor
-changelog
-```
+# Plot one
+ox.plot_graph_route(G, routes[0], route_linewidth=4, node_size=0)
